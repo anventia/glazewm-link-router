@@ -1,7 +1,7 @@
 // ==WindhawkMod==
 // @id             pivotlink-browser-router
 // @name           PivotLink: Browser Router
-// @description    Lightweight link redirection tool with an intuitive 5-tier ranked configuration layout and gaming exclusions.
+// @description    Lightweight link redirection tool with an intuitive 5-tier ranked configuration layout and automatic game detection.
 // @version        0.6
 // @author         You
 // @github         https://github.com/yourusername/smart-link-router
@@ -12,8 +12,29 @@
 
 // ==WindhawkModReadme==
 /*
-High-performance, resource-aware layout designed to safely route sandboxed and native OS web links without degrading system or gaming performance.
-Now features a structured, multi-tier ranking system for easier browser priority configuration.
+Ever had a browser open already and Windows opened a Discord/Slack link in your default browser by launching it from scratch? Now it won't.
+
+## What It Does
+
+PivotLink intercepts outgoing URL launches system-wide and redirects them to whichever browser you already have running, based on a 5-tier priority list you configure. Instead of Windows blindly spawning your default browser, PivotLink checks what's actually open and sends the link there.
+
+## How It Works
+
+- Hooks `ShellExecuteW`, `ShellExecuteExW`, and `CreateProcessW` to catch URL opens before they reach the OS default handler.
+- Scans the running process list using a single-pass converging search to find the highest-priority browser that's already active.
+- If a match is found, the link is silently rerouted to that browser. If none of your ranked browsers are running, the call falls through to normal Windows behavior.
+- Circular routing is prevented — if you're already inside the target browser, the hook steps aside.
+
+## Configuration
+
+- **Priority 1–5 Browsers**: Rank up to five browsers by executable name (e.g. `brave.exe`, `firefox.exe`). The first one found running wins.
+- **Gaming Override Allow List**: The mod auto-disables in any process that loads DirectX or Vulkan graphics DLLs (i.e. games). Add process names here to keep the mod active in specific games anyway (e.g. games with in-game browsers).
+
+## Notes
+
+- The mod skips Session 0 processes (system services) automatically.
+- Game detection works by checking for loaded `d3d9.dll`, `d3d11.dll`, `d3d12.dll`, and `vulkan-1.dll`. Configured browsers are excluded from this check since they load D3D for hardware acceleration.
+- A thread-local guard prevents recursive hook calls during redirection.
 */
 // ==/WindhawkModReadme==
 
@@ -34,9 +55,9 @@ Now features a structured, multi-tier ranking system for easier browser priority
 - browser5: ""
   $name: Priority 5 Browser (Lowest)
   $description: Fifth choice browser fallback. Leave blank to skip.
-- excludeProcesses: "csgo.exe;valorant.exe;r5apex.exe;fortniteclient-win64-shipping.exe;overwatch.exe;gta5.exe;eldenring.exe"
-  $name: Anti-Cheat & Gaming Exclusion List
-  $description: Semicolon-separated list of processes where this mod should completely disable itself to protect performance and avoid anti-cheat flags.
+- allowGameProcesses: ""
+  $name: Gaming Override Allow List
+  $description: The mod auto-disables in processes that load DirectX/Vulkan. Add process names here (semicolon-separated) to keep the mod active in specific games (e.g., games with in-game browsers).
 */
 // ==/WindhawkModSettings==
 
@@ -48,7 +69,7 @@ Now features a structured, multi-tier ranking system for easier browser priority
 #include <sstream>
 
 std::vector<std::wstring> g_priorityBrowsers;
-std::vector<std::wstring> g_excludedProcesses;
+std::vector<std::wstring> g_allowedGameProcesses;
 thread_local bool t_inHook = false; 
 
 // Memory-friendly trimming helper
@@ -99,6 +120,44 @@ std::wstring GetCurrentProcessName() {
     return L"UNKNOWN";
 }
 
+// Detects if the current process is a game by checking for loaded graphics DLLs.
+// Returns false for configured browsers (which load D3D for HW acceleration)
+// and for processes explicitly allowed by the user.
+bool IsCurrentProcessGame() {
+    const WCHAR* graphicsDlls[] = {
+        L"d3d9.dll",
+        L"d3d11.dll",
+        L"d3d12.dll",
+        L"vulkan-1.dll",
+    };
+
+    bool hasGraphics = false;
+    for (const auto& dll : graphicsDlls) {
+        if (GetModuleHandleW(dll)) {
+            hasGraphics = true;
+            break;
+        }
+    }
+    if (!hasGraphics) return false;
+
+    // Browsers load D3D for hardware acceleration — don't flag them as games
+    std::wstring currentProc = GetCurrentProcessName();
+    for (const auto& browser : g_priorityBrowsers) {
+        if (_wcsicmp(currentProc.c_str(), browser.c_str()) == 0) {
+            return false;
+        }
+    }
+
+    // User-allowed game processes keep the mod active
+    for (const auto& allowed : g_allowedGameProcesses) {
+        if (_wcsicmp(currentProc.c_str(), allowed.c_str()) == 0) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 void ParseSemicolonList(PCWSTR settingName, std::vector<std::wstring>& targetVector) {
     targetVector.clear();
     PCWSTR rawSetting = Wh_GetStringSetting(settingName);
@@ -141,13 +200,16 @@ void LoadSettings() {
         g_priorityBrowsers = { L"brave.exe", L"firefox.exe", L"chrome.exe", L"msedge.exe" };
     }
 
-    // Load exclusions
-    ParseSemicolonList(L"excludeProcesses", g_excludedProcesses);
+    // Load game allow list
+    ParseSemicolonList(L"allowGameProcesses", g_allowedGameProcesses);
 }
 
 // Global engine for standard Win32 execution redirection
 bool RouteLinkIfNecessary(const WCHAR* lpFile, const WCHAR* lpParameters, int nShow) {
     if (!lpFile || t_inHook) return false;
+
+    // Auto-disable in game processes with loaded graphics DLLs
+    if (IsCurrentProcessGame()) return false;
 
     // Fast-path evaluation without allocating memory buffers
     bool isLink = (_wcsnicmp(lpFile, L"http://", 7) == 0 || _wcsnicmp(lpFile, L"https://", 8) == 0);
@@ -216,7 +278,7 @@ BOOL WINAPI CreateProcessW_Hook(LPCWSTR lpApplicationName, LPWSTR lpCommandLine,
                                 LPSECURITY_ATTRIBUTES lpThreadAttributes, BOOL bInheritHandles, DWORD dwCreationFlags,
                                 LPVOID lpEnvironment, LPCWSTR lpCurrentDirectory, LPSTARTUPINFOW lpStartupInfo,
                                 LPPROCESS_INFORMATION lpProcessInformation) {
-    if (t_inHook) {
+    if (t_inHook || IsCurrentProcessGame()) {
         return CreateProcessW_Original(lpApplicationName, lpCommandLine, lpProcessAttributes, lpThreadAttributes,
                                        bInheritHandles, dwCreationFlags, lpEnvironment, lpCurrentDirectory, lpStartupInfo, lpProcessInformation);
     }
@@ -283,12 +345,10 @@ BOOL Wh_ModInit() {
 
     LoadSettings();
 
-    // Gaming & Anti-Cheat Protection Blocklist
-    std::wstring currentProc = GetCurrentProcessName();
-    for (const auto& excluded : g_excludedProcesses) {
-        if (_wcsicmp(currentProc.c_str(), excluded.c_str()) == 0) {
-            return FALSE; 
-        }
+    // Auto-detect game processes via loaded graphics DLLs
+    if (IsCurrentProcessGame()) {
+        Wh_Log(L"[PivotLink] Graphics DLLs detected — disabling in game process.");
+        return FALSE;
     }
 
     // Apply Hooks cleanly
