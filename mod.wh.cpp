@@ -249,6 +249,9 @@ bool RouteLinkIfNecessary(const WCHAR* lpFile, const WCHAR* lpVerb, const WCHAR*
 }
 
 BOOL WINAPI ShellExecuteExW_Hook(LPSHELLEXECUTEINFOW pExecInfo) {
+    Wh_Log(L"ShellExecuteExW_Hook called: lpFile=%s lpVerb=%s",
+        (pExecInfo && pExecInfo->lpFile) ? pExecInfo->lpFile : L"(null)",
+        (pExecInfo && pExecInfo->lpVerb) ? pExecInfo->lpVerb : L"(null)");
     if (pExecInfo && pExecInfo->lpFile) {
         if (RouteLinkIfNecessary(pExecInfo->lpFile, pExecInfo->lpVerb, pExecInfo->lpParameters, pExecInfo->nShow)) {
             pExecInfo->hInstApp = (HINSTANCE)33; 
@@ -262,6 +265,9 @@ using ShellExecuteW_t = decltype(&ShellExecuteW);
 ShellExecuteW_t ShellExecuteW_Original;
 
 HINSTANCE WINAPI ShellExecuteW_Hook(HWND hwnd, LPCWSTR lpOperation, LPCWSTR lpFile, LPCWSTR lpParameters, LPCWSTR lpDirectory, INT nShow) {
+    Wh_Log(L"ShellExecuteW_Hook called: lpFile=%s lpOperation=%s",
+        lpFile ? lpFile : L"(null)",
+        lpOperation ? lpOperation : L"(null)");
     if (RouteLinkIfNecessary(lpFile, lpOperation, lpParameters, nShow)) {
         return (HINSTANCE)33;
     }
@@ -277,9 +283,12 @@ BOOL Wh_ModInit() {
 
     LoadSettings();
 
+    Wh_Log(L"PivotLink: Mod loaded in process %s (PID %u)", GetCurrentProcessName().c_str(), GetCurrentProcessId());
+
     WindhawkUtils::SetFunctionHook(ShellExecuteExW, ShellExecuteExW_Hook, &ShellExecuteExW_Original);
     WindhawkUtils::SetFunctionHook(ShellExecuteW, ShellExecuteW_Hook, &ShellExecuteW_Original);
 
+    Wh_Log(L"PivotLink: Hooks set successfully");
     return TRUE;
 }
 
