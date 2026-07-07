@@ -59,9 +59,12 @@ PivotLink intercepts outgoing URL launches system-wide and redirects them to whi
 #include <windows.h>
 #include <shellapi.h>
 #include <tlhelp32.h>
+#include <windhawk_utils.h>
+#include <mutex>
 #include <vector>
 #include <string>
 
+std::mutex g_settingsMutex;
 std::vector<std::wstring> g_priorityBrowsers;
 thread_local bool t_inHook = false; 
 
@@ -165,6 +168,9 @@ void LoadSettings() {
     g_priorityBrowsers = std::move(browsers);
 }
 
+using ShellExecuteExW_t = decltype(&ShellExecuteExW);
+ShellExecuteExW_t ShellExecuteExW_Original;
+
 bool RouteLinkIfNecessary(const WCHAR* lpFile, const WCHAR* lpVerb, const WCHAR* lpParameters, int nShow) {
     if (!lpFile || t_inHook) return false;
 
@@ -204,9 +210,6 @@ bool RouteLinkIfNecessary(const WCHAR* lpFile, const WCHAR* lpVerb, const WCHAR*
     }
     return false;
 }
-
-using ShellExecuteExW_t = decltype(&ShellExecuteExW);
-ShellExecuteExW_t ShellExecuteExW_Original;
 
 BOOL WINAPI ShellExecuteExW_Hook(LPSHELLEXECUTEINFOW pExecInfo) {
     if (pExecInfo && pExecInfo->lpFile) {
