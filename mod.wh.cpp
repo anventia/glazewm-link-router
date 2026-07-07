@@ -86,6 +86,13 @@ static BOOL CALLBACK CheckVisibleWindowProc(HWND hwnd, LPARAM lParam) {
     DWORD pid = 0;
     GetWindowThreadProcessId(hwnd, &pid);
     if (pid == check->processId && IsWindowVisible(hwnd)) {
+        // Skip tool windows (tray icons, notification popups, etc.)
+        LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        if (exStyle & WS_EX_TOOLWINDOW) return TRUE;
+
+        // Real browser windows have a title bar with page/app name
+        if (GetWindowTextLengthW(hwnd) == 0) return TRUE;
+
         RECT rect;
         if (GetWindowRect(hwnd, &rect) && (rect.right - rect.left) > 1 && (rect.bottom - rect.top) > 1) {
             check->found = true;
