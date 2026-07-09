@@ -20,7 +20,7 @@ PivotLink intercepts outgoing URL launches system-wide and redirects them to whi
 
 ## How It Works
 
-- Hooks `ShellExecuteW` and `ShellExecuteExW` to catch URL opens before they reach the OS default handler.
+- Hooks `ShellExecuteW`, `ShellExecuteExW`, and `CreateProcessW` to catch URL opens before they reach the OS default handler.
 - Scans the running process list using a single-pass converging search to find the highest-priority browser that's already active.
 - If a match is found, the link is silently rerouted to that browser. If none of your ranked browsers are running, the call falls through to normal Windows behavior.
 - Circular routing is prevented — if you're already inside the target browser, the hook steps aside.
@@ -40,7 +40,7 @@ PivotLink intercepts outgoing URL launches system-wide and redirects them to whi
 /*
 - browser1: "brave.exe"
   $name: Priority 1 Browser (Highest)
-  $description: Your primary choice for link redirection (e.g., brave.exe). Leave blank to skip.
+  $description: Ideally your default browser — but any browser works. Links route to the highest-priority one that's running.
 - browser2: "firefox.exe"
   $name: Priority 2 Browser
   $description: Second choice browser if Priority 1 is not running. Leave blank to skip.
@@ -87,49 +87,23 @@ static BOOL CALLBACK CheckVisibleWindowProc(HWND hwnd, LPARAM lParam) {
     GetWindowThreadProcessId(hwnd, &pid);
     if (pid != check->processId) return TRUE;
 
-    BOOL visible = IsWindowVisible(hwnd);
-    LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    if (!IsWindowVisible(hwnd)) return TRUE;
+
     LONG_PTR exStyle = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-    int titleLen = GetWindowTextLengthW(hwnd);
-    WCHAR title[256] = {};
-    GetWindowTextW(hwnd, title, 256);
+    if (exStyle & WS_EX_TOOLWINDOW) return TRUE;
+    if (GetWindowTextLengthW(hwnd) == 0) return TRUE;
+
     RECT rect = {};
     GetWindowRect(hwnd, &rect);
+    if ((rect.right - rect.left) <= 1 || (rect.bottom - rect.top) <= 1) return TRUE;
 
-    Wh_Log(L"  PID %u hwnd=%p visible=%d minimized=%d toolWnd=%d title(%d)=\"%s\" rect=[%d,%d,%d,%d]",
-        pid, hwnd, visible,
-        (style & WS_MINIMIZE) ? 1 : 0,
-        (exStyle & WS_EX_TOOLWINDOW) ? 1 : 0,
-        titleLen, title,
-        rect.left, rect.top, rect.right, rect.bottom);
-
-    if (!visible) {
-        Wh_Log(L"  -> Skipped: not visible");
-        return TRUE;
-    }
-    if (exStyle & WS_EX_TOOLWINDOW) {
-        Wh_Log(L"  -> Skipped: tool window");
-        return TRUE;
-    }
-    if (titleLen == 0) {
-        Wh_Log(L"  -> Skipped: no title");
-        return TRUE;
-    }
-    if ((rect.right - rect.left) <= 1 || (rect.bottom - rect.top) <= 1) {
-        Wh_Log(L"  -> Skipped: rect too small");
-        return TRUE;
-    }
-
-    Wh_Log(L"  -> MATCH: valid browser window");
     check->found = true;
     return FALSE;
 }
 
 static bool HasVisibleWindow(DWORD processId) {
-    Wh_Log(L"HasVisibleWindow checking PID %u", processId);
     VisibleWindowCheck check = { processId, false };
     EnumWindows(CheckVisibleWindowProc, reinterpret_cast<LPARAM>(&check));
-    Wh_Log(L"HasVisibleWindow PID %u result: %s", processId, check.found ? L"FOUND" : L"NOT FOUND");
     return check.found;
 }
 
@@ -163,16 +137,11 @@ std::wstring GetHighestPriorityRunningBrowser() {
     CloseHandle(hSnap);
 
     for (size_t i = 0; i < browsers.size(); ++i) {
-        Wh_Log(L"Checking browser[%d]: %s (%d PIDs found)", (int)i, browsers[i].c_str(), (int)browserPids[i].size());
         for (DWORD pid : browserPids[i]) {
-            if (HasVisibleWindow(pid)) {
-                Wh_Log(L"Winner: %s (PID %u)", browsers[i].c_str(), pid);
-                return browsers[i];
-            }
+            if (HasVisibleWindow(pid)) return browsers[i];
         }
     }
-    
-    Wh_Log(L"No running browser found");
+
     return L"";
 }
 
@@ -212,23 +181,22 @@ bool RouteLinkIfNecessary(const WCHAR* lpFile, const WCHAR* lpVerb, const WCHAR*
     // Only redirect default (NULL) or "open" verbs
     if (lpVerb && _wcsicmp(lpVerb, L"open") != 0) return false;
 
-    bool isLink = (_wcsnicmp(lpFile, L"http://", 7) == 0 || _wcsnicmp(lpFile, L"https://", 8) == 0);
+    // Strip surrounding quotes — some apps (Discord, VSCodium) pass quoted URLs
+    std::wstring cleanUrl = lpFile;
+    if (cleanUrl.length() >= 2 && cleanUrl.front() == L'"' && cleanUrl.back() == L'"') {
+        cleanUrl = cleanUrl.substr(1, cleanUrl.length() - 2);
+    }
+
+    bool isLink = (_wcsnicmp(cleanUrl.c_str(), L"http://", 7) == 0 || _wcsnicmp(cleanUrl.c_str(), L"https://", 8) == 0);
     if (!isLink) return false;
 
     std::wstring currentProc = GetCurrentProcessName();
-    Wh_Log(L"RouteLinkIfNecessary: URL=%s from=%s", lpFile, currentProc.c_str());
     std::wstring targetBrowser = GetHighestPriorityRunningBrowser();
-    Wh_Log(L"Target browser result: \"%s\"", targetBrowser.c_str());
 
     if (!targetBrowser.empty()) {
         // Prevent circular routing inside the target browser
         if (_wcsicmp(currentProc.c_str(), targetBrowser.c_str()) == 0) {
             return false;
-        }
-
-        std::wstring cleanUrl = lpFile;
-        if (cleanUrl.length() >= 2 && cleanUrl.front() == L'"' && cleanUrl.back() == L'"') {
-            cleanUrl = cleanUrl.substr(1, cleanUrl.length() - 2);
         }
 
         Wh_Log(L"Routing link to: %s", targetBrowser.c_str());
@@ -249,9 +217,6 @@ bool RouteLinkIfNecessary(const WCHAR* lpFile, const WCHAR* lpVerb, const WCHAR*
 }
 
 BOOL WINAPI ShellExecuteExW_Hook(LPSHELLEXECUTEINFOW pExecInfo) {
-    Wh_Log(L"ShellExecuteExW_Hook called: lpFile=%s lpVerb=%s",
-        (pExecInfo && pExecInfo->lpFile) ? pExecInfo->lpFile : L"(null)",
-        (pExecInfo && pExecInfo->lpVerb) ? pExecInfo->lpVerb : L"(null)");
     if (pExecInfo && pExecInfo->lpFile) {
         if (RouteLinkIfNecessary(pExecInfo->lpFile, pExecInfo->lpVerb, pExecInfo->lpParameters, pExecInfo->nShow)) {
             pExecInfo->hInstApp = (HINSTANCE)33; 
@@ -264,14 +229,129 @@ BOOL WINAPI ShellExecuteExW_Hook(LPSHELLEXECUTEINFOW pExecInfo) {
 using ShellExecuteW_t = decltype(&ShellExecuteW);
 ShellExecuteW_t ShellExecuteW_Original;
 
+using CreateProcessW_t = decltype(&CreateProcessW);
+CreateProcessW_t CreateProcessW_Original;
+
+// Resolve full path of a browser via Windows App Paths registry
+std::wstring GetBrowserFullPath(const std::wstring& exeName) {
+    std::wstring keyPath = L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\App Paths\\" + exeName;
+    WCHAR path[MAX_PATH] = {};
+    DWORD size = sizeof(path);
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, keyPath.c_str(), NULL, RRF_RT_REG_SZ, NULL, path, &size) == ERROR_SUCCESS)
+        return path;
+    size = sizeof(path);
+    if (RegGetValueW(HKEY_CURRENT_USER, keyPath.c_str(), NULL, RRF_RT_REG_SZ, NULL, path, &size) == ERROR_SUCCESS)
+        return path;
+    return L"";
+}
+
 HINSTANCE WINAPI ShellExecuteW_Hook(HWND hwnd, LPCWSTR lpOperation, LPCWSTR lpFile, LPCWSTR lpParameters, LPCWSTR lpDirectory, INT nShow) {
-    Wh_Log(L"ShellExecuteW_Hook called: lpFile=%s lpOperation=%s",
-        lpFile ? lpFile : L"(null)",
-        lpOperation ? lpOperation : L"(null)");
     if (RouteLinkIfNecessary(lpFile, lpOperation, lpParameters, nShow)) {
         return (HINSTANCE)33;
     }
     return ShellExecuteW_Original(hwnd, lpOperation, lpFile, lpParameters, lpDirectory, nShow);
+}
+
+BOOL WINAPI CreateProcessW_Hook(
+    LPCWSTR lpApplicationName,
+    LPWSTR lpCommandLine,
+    LPSECURITY_ATTRIBUTES lpProcessAttributes,
+    LPSECURITY_ATTRIBUTES lpThreadAttributes,
+    BOOL bInheritHandles,
+    DWORD dwCreationFlags,
+    LPVOID lpEnvironment,
+    LPCWSTR lpCurrentDirectory,
+    LPSTARTUPINFOW lpStartupInfo,
+    LPPROCESS_INFORMATION lpProcessInformation)
+{
+    if (lpCommandLine && !t_inHook) {
+        // Skip if the calling process is itself a configured browser —
+        // prevents catching internal browser URLs (cr.brave.com, telemetry)
+        // and cascading redirects when the default browser starts up.
+        std::wstring currentProc = GetCurrentProcessName();
+        {
+            std::lock_guard<std::mutex> lock(g_settingsMutex);
+            for (const auto& b : g_priorityBrowsers) {
+                if (_wcsicmp(currentProc.c_str(), b.c_str()) == 0) {
+                    goto passthrough;
+                }
+            }
+        }
+
+        {
+            // Determine the target executable name being launched
+            std::wstring targetExe;
+            if (lpApplicationName) {
+                std::wstring appPath(lpApplicationName);
+                size_t pos = appPath.find_last_of(L"\\/");
+                targetExe = (pos != std::wstring::npos) ? appPath.substr(pos + 1) : appPath;
+            } else if (lpCommandLine) {
+                std::wstring cl(lpCommandLine);
+                size_t start = (cl[0] == L'"') ? 1 : 0;
+                size_t end = (cl[0] == L'"') ? cl.find(L'"', 1) : cl.find_first_of(L" \t");
+                std::wstring appPath = (end != std::wstring::npos) ? cl.substr(start, end - start) : cl.substr(start);
+                size_t pos = appPath.find_last_of(L"\\/");
+                targetExe = (pos != std::wstring::npos) ? appPath.substr(pos + 1) : appPath;
+            }
+
+            // Only intercept if the target process is a browser in our priority list.
+            // This prevents false positives from git, curl, etc. that have URLs in args.
+            bool targetIsBrowser = false;
+            {
+                std::lock_guard<std::mutex> lock(g_settingsMutex);
+                for (const auto& b : g_priorityBrowsers) {
+                    if (_wcsicmp(targetExe.c_str(), b.c_str()) == 0) {
+                        targetIsBrowser = true;
+                        break;
+                    }
+                }
+            }
+            if (!targetIsBrowser) goto passthrough;
+
+            std::wstring cmdLine(lpCommandLine);
+
+            // Quick scan for URL in command line
+            std::wstring::size_type urlPos = cmdLine.find(L"https://");
+            if (urlPos == std::wstring::npos)
+                urlPos = cmdLine.find(L"http://");
+
+            if (urlPos != std::wstring::npos) {
+                // Extract URL (may be quoted or unquoted)
+                std::wstring url;
+                size_t end = cmdLine.find_first_of(L" \t\"", urlPos);
+                url = (end != std::wstring::npos)
+                    ? cmdLine.substr(urlPos, end - urlPos)
+                    : cmdLine.substr(urlPos);
+
+                std::wstring targetBrowser = GetHighestPriorityRunningBrowser();
+                if (!targetBrowser.empty() &&
+                    _wcsicmp(currentProc.c_str(), targetBrowser.c_str()) != 0) {
+
+                    std::wstring targetPath = GetBrowserFullPath(targetBrowser);
+                    if (!targetPath.empty()) {
+                        Wh_Log(L"Rewriting CreateProcessW to %s", targetBrowser.c_str());
+
+                        // Replace the browser in the command line
+                        std::wstring newCmdLine = L"\"" + targetPath + L"\" " + url;
+                        std::vector<wchar_t> cmdBuf(newCmdLine.begin(), newCmdLine.end());
+                        cmdBuf.push_back(L'\0');
+
+                        return CreateProcessW_Original(
+                            targetPath.c_str(), cmdBuf.data(),
+                            lpProcessAttributes, lpThreadAttributes,
+                            bInheritHandles, dwCreationFlags, lpEnvironment,
+                            lpCurrentDirectory, lpStartupInfo, lpProcessInformation);
+                    }
+                }
+            }
+        }
+    }
+
+passthrough:
+    return CreateProcessW_Original(lpApplicationName, lpCommandLine,
+        lpProcessAttributes, lpThreadAttributes, bInheritHandles,
+        dwCreationFlags, lpEnvironment, lpCurrentDirectory,
+        lpStartupInfo, lpProcessInformation);
 }
 
 BOOL Wh_ModInit() {
@@ -283,12 +363,9 @@ BOOL Wh_ModInit() {
 
     LoadSettings();
 
-    Wh_Log(L"PivotLink: Mod loaded in process %s (PID %u)", GetCurrentProcessName().c_str(), GetCurrentProcessId());
-
     WindhawkUtils::SetFunctionHook(ShellExecuteExW, ShellExecuteExW_Hook, &ShellExecuteExW_Original);
     WindhawkUtils::SetFunctionHook(ShellExecuteW, ShellExecuteW_Hook, &ShellExecuteW_Original);
-
-    Wh_Log(L"PivotLink: Hooks set successfully");
+    WindhawkUtils::SetFunctionHook(CreateProcessW, CreateProcessW_Hook, &CreateProcessW_Original);
     return TRUE;
 }
 
