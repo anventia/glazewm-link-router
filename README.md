@@ -1,4 +1,5 @@
 ### DISCLAIMER: AI WAS USED TO GENERATE/MODIFY THIS CODE, USE AT YOUR OWN RISK
+I just had AI make this for my own personal use.
 
 
 Modified this code using Gemini to allow it to open the target browser window before opening the link.
