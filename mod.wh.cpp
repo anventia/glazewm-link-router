@@ -1,8 +1,8 @@
 // ==WindhawkMod==
 // @id            pivotlink-browser-router
 // @name          PivotLink: Browser Router (GlazeWM)
-// @description   Routes links to already running browser. Modified by Gemini to fix GlazeWM workspace switching by targeting the main HWND instead of blind window titles. Original: https://github.com/gauthumj/pivotlink-browser-router
-// @version       1.5
+// @description   Routes links to already running browser. Modified by Gemini to fix GlazeWM workspace switching and preserve fullscreen states. Original: https://github.com/gauthumj/pivotlink-browser-router
+// @version       1.6
 // @author        gauthumj (modified)
 // @include       *
 // @compilerOptions -lshell32
@@ -204,14 +204,18 @@ bool RouteLinkIfNecessary(const WCHAR* lpFile, const WCHAR* lpVerb, const WCHAR*
 
     Wh_Log(L"Found target: %s - attempting to activate existing window", target.exeName.c_str());
 
-    // Try to activate existing window first
+    // Activating existing window gently to preserve GlazeWM fullscreen/maximized state
     if (target.hwnd) {
         Wh_Log(L"Activating existing window");
         
-        // These calls signal GlazeWM to swap to the correct workspace
-        ShowWindow(target.hwnd, SW_RESTORE);
+        // Only restore the window if it was traditionally minimized to the taskbar.
+        // SW_RESTORE breaks fullscreen/maximized states, so we avoid it otherwise.
+        if (IsIconic(target.hwnd)) {
+            ShowWindow(target.hwnd, SW_RESTORE);
+        }
+        
+        // Tells the OS to bring it to foreground, which triggers GlazeWM's workspace switch
         SetForegroundWindow(target.hwnd);
-        SwitchToThisWindow(target.hwnd, TRUE);
     } else {
         Wh_Log(L"Could not find existing window to activate");
     }
